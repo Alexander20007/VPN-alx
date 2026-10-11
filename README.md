@@ -4,8 +4,13 @@ App Android de VPN (estilo injetor) com configuração manual de servidor e vár
 Núcleo: **sing-box** (compilado como `libbox.aar` direto no GitHub Actions). UI: Kotlin + Jetpack Compose.
 
 ## Protocolos
-VLESS (TLS / Reality), VMess, Trojan, Shadowsocks (incl. 2022), Hysteria2, TUIC, WireGuard, SSH.
-Transportes: TCP, WebSocket, HTTPUpgrade, gRPC.
+VLESS (TLS / Reality), VMess, Trojan, Shadowsocks (incl. 2022), ShadowTLS, Hysteria2, TUIC, WireGuard,
+SSH (com payload via proxy HTTP/SOCKS, opcionalmente com SSL/TLS), HTTP Proxy / HTTPS Proxy, SOCKS5.
+Transportes: TCP, WebSocket, HTTPUpgrade, HTTP/2, gRPC, QUIC.
+
+## Ajustes
+DNS (Cloudflare, Google, Quad9, AdGuard, personalizado) + DNS de bootstrap, IPv6, ignorar rede local,
+MTU, nível de log e split tunneling por app (somente selecionados / todos exceto selecionados).
 
 ## Recursos de injetor
 - Servidor (host/IP) separado de **SNI** e **Host** (domínio de fachada)

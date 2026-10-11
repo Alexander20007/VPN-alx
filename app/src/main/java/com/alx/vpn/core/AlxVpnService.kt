@@ -12,11 +12,13 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
+import android.os.ParcelFileDescriptor
 import android.system.OsConstants
 import androidx.core.app.NotificationCompat
 import com.alx.vpn.MainActivity
 import com.alx.vpn.R
 import com.alx.vpn.data.ProfileStore
+import com.alx.vpn.data.SettingsStore
 import io.nekohasekai.libbox.BoxService
 import io.nekohasekai.libbox.Libbox
 import io.nekohasekai.libbox.PlatformInterface
@@ -37,15 +39,16 @@ class AlxVpnService : VpnService() {
     @Volatile private var listener: Any? = null
     private var monitorCb: ConnectivityManager.NetworkCallback? = null
     @Volatile private var stopping = false
+    @Volatile private var tunPfd: ParcelFileDescriptor? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
-            startFg()
+            startFg("Desconectando…")
             stopVpn()
             return START_NOT_STICKY
         }
         val id = intent?.getStringExtra(EXTRA_PROFILE)
-        startFg()
+        startFg("Conectando…")
         VpnState.message.value = ""
         VpnState.status.value = VpnState.Status.Connecting
         thread(name = "alx-start") { startVpn(id) }
@@ -58,7 +61,7 @@ class AlxVpnService : VpnService() {
                 ?: error("Perfil não encontrado")
             VpnState.log("Iniciando ${p.name} (${p.protocol})")
             Core.ensureSetup(this)
-            val config = ConfigBuilder.build(p)
+            val config = ConfigBuilder.build(p, SettingsStore(this).load())
             val svc = Libbox.newService(config, PlatformProxy.create(this) as PlatformInterface)
             svc.start()
             box = svc
@@ -66,7 +69,9 @@ class AlxVpnService : VpnService() {
                 try { svc.close() } catch (_: Throwable) {}
                 return
             }
+            VpnState.connectedAt.value = System.currentTimeMillis()
             VpnState.status.value = VpnState.Status.Connected
+            startFg("Conectado a ${p.name}")
             VpnState.log("Conectado")
         } catch (t: Throwable) {
             val msg = (t.cause?.message ?: t.message ?: t.toString())
@@ -81,17 +86,28 @@ class AlxVpnService : VpnService() {
         if (stopping) return
         stopping = true
         thread(name = "alx-stop") {
-            try { box?.close() } catch (_: Throwable) {}
+            val b = box
             box = null
+            if (b != null) {
+                val t = thread(name = "alx-close") { try { b.close() } catch (_: Throwable) {} }
+                t.join(4000)
+            }
             stopMonitor()
+            closeTun()
             if (VpnState.status.value != VpnState.Status.Error) {
                 VpnState.status.value = VpnState.Status.Idle
             }
+            VpnState.connectedAt.value = 0L
             VpnState.log("Desconectado")
             @Suppress("DEPRECATION")
             stopForeground(true)
             stopSelf()
         }
+    }
+
+    private fun closeTun() {
+        try { tunPfd?.close() } catch (_: Throwable) {}
+        tunPfd = null
     }
 
     override fun onRevoke() {
@@ -102,6 +118,7 @@ class AlxVpnService : VpnService() {
         try { box?.close() } catch (_: Throwable) {}
         box = null
         stopMonitor()
+        closeTun()
         if (VpnState.status.value == VpnState.Status.Connected ||
             VpnState.status.value == VpnState.Status.Connecting
         ) VpnState.status.value = VpnState.Status.Idle
@@ -111,18 +128,35 @@ class AlxVpnService : VpnService() {
     // ---------- chamados pela PlatformProxy ----------
 
     fun openTunFd(): Int {
+        val cfg = SettingsStore(this).load()
+        closeTun()
         val b = Builder()
             .setSession("ALX VPN")
-            .setMtu(1500)
+            .setMtu(cfg.mtu)
             .addAddress("172.19.0.1", 30)
-            .addAddress("fdfe:dcba:9876::1", 126)
             .addRoute("0.0.0.0", 0)
-            .addRoute("::", 0)
             .addDnsServer("172.19.0.2")
+        if (cfg.ipv6) {
+            b.addAddress("fdfe:dcba:9876::1", 126).addRoute("::", 0)
+        }
         if (Build.VERSION.SDK_INT >= 29) b.setMetered(false)
+
+        // Split tunneling por app. O próprio ALX VPN fica fora do túnel para evitar loops.
+        val apps = cfg.apps.filter { it != packageName }
+        try {
+            if (cfg.appMode == "only" && apps.isNotEmpty()) {
+                apps.forEach { try { b.addAllowedApplication(it) } catch (_: Exception) {} }
+            } else {
+                if (cfg.appMode == "except") apps.forEach { try { b.addDisallowedApplication(it) } catch (_: Exception) {} }
+                b.addDisallowedApplication(packageName)
+            }
+        } catch (_: Exception) {}
+
         pickUnderlying()?.let { b.setUnderlyingNetworks(arrayOf(it)) }
         val pfd = b.establish() ?: throw IllegalStateException("Permissão de VPN negada ou revogada")
-        return pfd.detachFd()
+        tunPfd = pfd
+        // O sing-box recebe uma cópia do fd; o original fica aqui para fechar a "chave" ao desconectar.
+        return pfd.dup().detachFd()
     }
 
     fun startMonitor(l: Any) {
@@ -236,7 +270,7 @@ class AlxVpnService : VpnService() {
 
     // ---------- notificação ----------
 
-    private fun startFg() {
+    private fun startFg(text: String) {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= 26) {
             nm.createNotificationChannel(NotificationChannel(CHANNEL, "ALX VPN", NotificationManager.IMPORTANCE_LOW))
@@ -251,10 +285,11 @@ class AlxVpnService : VpnService() {
         val n = NotificationCompat.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_stat)
             .setContentTitle("ALX VPN")
-            .setContentText("VPN ativa")
+            .setContentText(text)
             .setContentIntent(open)
             .addAction(0, "Desconectar", stop)
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
             .build()
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)

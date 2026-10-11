@@ -12,6 +12,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import com.alx.vpn.core.AlxVpnService
 import com.alx.vpn.data.ProfileStore
+import com.alx.vpn.data.SettingsStore
 import com.alx.vpn.ui.AlxApp
 import com.alx.vpn.ui.AlxTheme
 
@@ -32,7 +33,7 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= 33) notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         setContent {
             AlxTheme {
-                AlxApp(store, onConnect = ::connect, onDisconnect = ::disconnect)
+                AlxApp(store, SettingsStore(this), onConnect = ::connect, onDisconnect = ::disconnect)
             }
         }
     }
